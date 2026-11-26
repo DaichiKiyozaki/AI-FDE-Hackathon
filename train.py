@@ -149,6 +149,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    args.output.mkdir(parents=True, exist_ok=True)
+    history = [("epoch", "train_loss", "valid_loss", "valid_f1", "valid_ap")]
     for epoch in range(1, args.epochs + 1):
         train_loss, _ = run_epoch(model, train_loader, device, criterion, optimizer, scaler)
         valid_loss, probabilities = run_epoch(model, valid_loader, device, criterion)
@@ -157,9 +159,11 @@ def main():
         ap = average_precision_score(valid_labels, probabilities)
         print(f"epoch {epoch:2d}: train_loss={train_loss:.4f} valid_loss={valid_loss:.4f} "
               f"valid_F1={f1:.4f} valid_AP={ap:.4f}")
+        history.append((epoch, train_loss, valid_loss, f1, ap))
 
     # 4. 最後のepochのモデルと、検証画像でF1が最大になる閾値を保存する。
-    args.output.mkdir(parents=True, exist_ok=True)
+    with (args.output / "history.csv").open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows(history)
     torch.save(model.state_dict(), args.output / "model.pt")
     (args.output / "threshold.json").write_text(
         json.dumps({"threshold": threshold, "valid_f1": f1, "valid_ap": float(ap)}, indent=2)

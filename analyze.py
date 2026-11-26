@@ -1,6 +1,7 @@
-"""検証画像の予測結果から、上手くいった例・失敗した例を並べた画像を作る（評価用画像は使わない）。
+"""学習曲線と、検証画像の成功例・失敗例を並べた画像を作る（評価用画像は使わない）。
 
-行ごとに次の例を確率の順に並べる：
+learning_curve.png: エポックごとの損失と検証 F1 / AP
+analysis.png: 次の例を確率の順に並べる
     TP: 検出できた陽性 / FN: 見逃した陽性 / FP: 誤検出した陰性 / TN near threshold: 閾値に近かった陰性
 
     python analyze.py
@@ -24,6 +25,24 @@ def main():
     parser.add_argument("--model-dir", type=Path, default=Path("outputs/model"))
     parser.add_argument("--per-row", type=int, default=8)
     args = parser.parse_args()
+
+    with (args.model_dir / "history.csv").open(encoding="utf-8") as handle:
+        history = list(csv.DictReader(handle))
+    epochs = [int(h["epoch"]) for h in history]
+    fig, (loss_axis, score_axis) = plt.subplots(1, 2, figsize=(10, 3.5))
+    for key in ["train_loss", "valid_loss"]:
+        loss_axis.plot(epochs, [float(h[key]) for h in history], marker=".", label=key)
+    for key in ["valid_f1", "valid_ap"]:
+        score_axis.plot(epochs, [float(h[key]) for h in history], marker=".", label=key)
+    loss_axis.set_title("loss")
+    score_axis.set_title("validation F1 / AP")
+    score_axis.set_ylim(0, 1)
+    for axis in (loss_axis, score_axis):
+        axis.set_xlabel("epoch")
+        axis.grid(alpha=0.3)
+        axis.legend()
+    fig.tight_layout()
+    fig.savefig(args.model_dir / "learning_curve.png", dpi=90)
 
     threshold = json.loads((args.model_dir / "threshold.json").read_text())["threshold"]
     with (args.model_dir / "valid_predictions.csv").open(encoding="utf-8") as handle:
@@ -52,7 +71,7 @@ def main():
     fig.suptitle(f"validation examples (threshold={threshold:.4f})")
     fig.tight_layout()
     fig.savefig(args.model_dir / "analysis.png", dpi=90)
-    print(f"-> {args.model_dir / 'analysis.png'}")
+    print(f"-> {args.model_dir / 'learning_curve.png'}, {args.model_dir / 'analysis.png'}")
 
 
 if __name__ == "__main__":
