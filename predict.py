@@ -65,13 +65,15 @@ def main():
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = build_model()
+    info = json.loads((args.model_dir / "threshold.json").read_text())
+    threshold, edges = info["threshold"], info.get("edges", False)
+    model = build_model(edges)
     model.load_state_dict(torch.load(args.model_dir / "model.pt", map_location=device, weights_only=True))
     model.to(device).eval()
-    threshold = json.loads((args.model_dir / "threshold.json").read_text())["threshold"]
 
     test_paths = (args.data_dir / "test.txt").read_text(encoding="utf-8").split()
-    loader = DataLoader(WallDataset([(path, 0) for path in test_paths], args.data_dir / "SDNET2018"), batch_size=128)
+    dataset = WallDataset([(path, 0) for path in test_paths], args.data_dir / "SDNET2018", edges=edges)
+    loader = DataLoader(dataset, batch_size=128)
     probabilities = []
     with torch.no_grad():
         for images, _ in loader:

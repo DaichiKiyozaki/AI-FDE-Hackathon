@@ -1,6 +1,6 @@
 """Pコン跡の有無を判定する ResNet-18 を学習する（事前学習なし）。
 
-学習用の元写真40枚のうち、folds.csv で検証用（fold 0）に指定した8枚を検証に使い、残り32枚で学習する。
+学習用の元写真40枚のうち、valid_photos.csv に書いた8枚を検証に使い、残り32枚で学習する。
 最後のepochのモデルで検証画像を予測し、F1が最大になる閾値を決めて保存する。
 
     python train.py
@@ -13,6 +13,7 @@ import os
 import random
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -26,10 +27,11 @@ from torchvision.models import resnet18
 class WallDataset(Dataset):
     """(画像の相対パス, ラベル) のリストから、画像テンソルとラベルを返す。"""
 
-    def __init__(self, rows, image_dir, augment=False):
+    def __init__(self, rows, image_dir, augment=False, edges=False):
         self.rows = rows
         self.image_dir = Path(image_dir)
         self.augment = augment
+        self.edges = edges
         # 画素値を [-1, 1] に変換する（外部データの統計量は使わない）。
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -42,7 +44,12 @@ class WallDataset(Dataset):
     def __getitem__(self, index):
         path, label = self.rows[index]
         with Image.open(self.image_dir / path) as image:
-            tensor = self.transform(image.convert("RGB"))
+            rgb = image.convert("RGB")
+        tensor = self.transform(rgb)
+        if self.edges:
+            # Canny（最小30・最大60）でPコン跡の輪郭やひび割れを2値画像にし、4つ目のチャネルとして加える
+            edge = cv2.Canny(np.asarray(rgb.convert("L")), 30, 60)
+            tensor = torch.cat([tensor, torch.from_numpy(edge).float().div(255).sub(0.5).div(0.5).unsqueeze(0)])
         if self.augment:
             # Pコン跡は円形なので、90度単位の回転・反転をしてもラベルは変わらない。
             # 90度単位なら画像の端が欠けず、端に一部だけ写ったPコン跡も残る。
@@ -52,9 +59,12 @@ class WallDataset(Dataset):
         return tensor, torch.tensor(label, dtype=torch.float32)
 
 
-def build_model():
-    """事前学習なしの ResNet-18。出力は「Pコン跡らしさ」のスコア1つ。"""
-    return resnet18(weights=None, num_classes=1)
+def build_model(edges=False):
+    """事前学習なしの ResNet-18。出力は「Pコン跡らしさ」のスコア1つ。edges=True なら入力4チャネル。"""
+    model = resnet18(weights=None, num_classes=1)
+    if edges:
+        model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    return model
 
 
 def seed_everything(seed):
@@ -103,14 +113,14 @@ def run_epoch(model, loader, device, criterion, optimizer=None, scaler=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--folds", type=Path, default=Path("folds.csv"))
-    parser.add_argument("--valid-fold", type=int, default=0)
+    parser.add_argument("--valid-photos", type=Path, default=Path("valid_photos.csv"))
     parser.add_argument("--output", type=Path, default=Path("outputs/model"))
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--pos-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--edges", action="store_true", help="エッジの2値画像を4つ目の入力チャネルに加える")
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_dir = args.data_dir / "SDNET2018"
@@ -119,9 +129,10 @@ def main():
     #    同じ写真のタイルは見た目が似ているため、タイル単位で分けると検証が甘くなる。
     with (args.data_dir / "train_label.csv").open(encoding="utf-8") as handle:
         rows = [(path, int(label)) for path, label in csv.reader(handle)]
-    with args.folds.open(encoding="utf-8") as handle:
-        fold_of_photo = {row["photo_id"]: int(row["fold"]) for row in csv.DictReader(handle)}
-    is_valid = [fold_of_photo[Path(path).stem.split("-")[0]] == args.valid_fold for path, _ in rows]
+    with args.valid_photos.open(encoding="utf-8") as handle:
+        valid_photos = {row["photo_id"] for row in csv.DictReader(handle)}
+    # ファイル名は「元写真ID-タイル番号.jpg」（例: W/CW/7078-150.jpg → 元写真 7078）
+    is_valid = [Path(path).stem.split("-")[0] in valid_photos for path, _ in rows]
     train_rows = [row for row, valid in zip(rows, is_valid) if not valid]
     valid_rows = [row for row, valid in zip(rows, is_valid) if valid]
     train_labels = np.array([label for _, label in train_rows])
@@ -130,21 +141,22 @@ def main():
           f"valid: {len(valid_rows)} images ({valid_labels.sum()} positive)")
 
     # 2. 陽性は約2%しかないため、学習時は陽性が約1割になるよう多めに抽選する。
-    seed_everything(args.seed + args.valid_fold)
+    seed_everything(args.seed)
     counts = np.bincount(train_labels, minlength=2)
     weights = np.where(train_labels == 1, args.pos_fraction / counts[1], (1 - args.pos_fraction) / counts[0])
     sampler = WeightedRandomSampler(
         torch.as_tensor(weights, dtype=torch.double), num_samples=len(train_rows), replacement=True,
-        generator=torch.Generator().manual_seed(args.seed + args.valid_fold),
+        generator=torch.Generator().manual_seed(args.seed),
     )
     train_loader = DataLoader(
-        WallDataset(train_rows, image_dir, augment=True), batch_size=args.batch_size, sampler=sampler,
-        generator=torch.Generator().manual_seed(args.seed + args.valid_fold), pin_memory=True,
+        WallDataset(train_rows, image_dir, augment=True, edges=args.edges), batch_size=args.batch_size, sampler=sampler,
+        generator=torch.Generator().manual_seed(args.seed), pin_memory=True,
     )
-    valid_loader = DataLoader(WallDataset(valid_rows, image_dir), batch_size=args.batch_size, pin_memory=True)
+    valid_loader = DataLoader(WallDataset(valid_rows, image_dir, edges=args.edges), batch_size=args.batch_size,
+                              pin_memory=True)
 
     # 3. 学習する。学習率は cosine で徐々に下げ、最後のepochのモデルを安定させる。
-    model = build_model().to(device)
+    model = build_model(args.edges).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -166,7 +178,7 @@ def main():
         csv.writer(handle).writerows(history)
     torch.save(model.state_dict(), args.output / "model.pt")
     (args.output / "threshold.json").write_text(
-        json.dumps({"threshold": threshold, "valid_f1": f1, "valid_ap": float(ap)}, indent=2)
+        json.dumps({"threshold": threshold, "valid_f1": f1, "valid_ap": float(ap), "edges": args.edges}, indent=2)
     )
     with (args.output / "valid_predictions.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)

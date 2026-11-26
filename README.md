@@ -14,11 +14,11 @@
 ## 構成
 
 ```
-train.py    学習。モデル（model.pt）と閾値（threshold.json）を outputs/model/ に保存
-predict.py  評価用画像を予測（TTA ＋ ハフ変換による加点）し、提出ファイル outputs/submission.csv を作成
-analyze.py  学習曲線と、検証画像の成功例・失敗例を並べた画像を作成（分析用）
-docs/       README に載せている図
-folds.csv   元写真ごとの分割番号（fold 0 の 8 枚を検証に使う）
+train.py          学習。モデル（model.pt）と閾値（threshold.json）を outputs/model/ に保存
+predict.py        評価用画像を予測（TTA ＋ ハフ変換による加点）し、提出ファイル outputs/submission.csv を作成
+analyze.py        学習曲線と、検証画像の成功例・失敗例を並べた画像を作成（分析用）
+valid_photos.csv  検証に使う元写真 8 枚の ID（残り 32 枚で学習する）
+docs/             README に載せている図
 ```
 
 - **モデル**：ResNet-18（torchvision、`weights=None` でランダム初期化）。出力は Pコン跡らしさのスコア 1 つ
