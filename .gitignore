@@ -1,0 +1,9 @@
+# 提出に必要なファイルだけを管理対象にする（それ以外はすべて除外）
+*
+!.gitignore
+!README.md
+!requirements.txt
+!folds.csv
+!train.py
+!predict.py
+!analyze.py
