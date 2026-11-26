@@ -3,4 +3,5 @@ torchvision
 numpy
 scikit-learn
 pillow
+opencv-python-headless
 matplotlib
