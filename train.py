@@ -1,5 +1,6 @@
 """Pコン跡の有無を判定する ResNet-18 を学習する（事前学習なし）。
 
+入力は RGB と、Canny によるエッジの2値画像の4チャネル（--no-edges で RGB のみ）。
 学習用の元写真40枚のうち、valid_photos.csv に書いた8枚を検証に使い、残り32枚で学習する。
 最後のepochのモデルで検証画像を予測し、F1が最大になる閾値を決めて保存する。
 
@@ -21,7 +22,9 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
-from torchvision.models import resnet18
+from torchvision.models import resnet18, resnet34, resnet50
+
+ARCHITECTURES = {"resnet18": resnet18, "resnet34": resnet34, "resnet50": resnet50}
 
 
 class WallDataset(Dataset):
@@ -59,9 +62,9 @@ class WallDataset(Dataset):
         return tensor, torch.tensor(label, dtype=torch.float32)
 
 
-def build_model(edges=False):
-    """事前学習なしの ResNet-18。出力は「Pコン跡らしさ」のスコア1つ。edges=True なら入力4チャネル。"""
-    model = resnet18(weights=None, num_classes=1)
+def build_model(edges=False, arch="resnet18"):
+    """事前学習なしの ResNet。出力は「Pコン跡らしさ」のスコア1つ。edges=True なら入力4チャネル。"""
+    model = ARCHITECTURES[arch](weights=None, num_classes=1)
     if edges:
         model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
     return model
@@ -120,7 +123,9 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--pos-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--edges", action="store_true", help="エッジの2値画像を4つ目の入力チャネルに加える")
+    parser.add_argument("--arch", choices=sorted(ARCHITECTURES), default="resnet18")
+    parser.add_argument("--edges", action=argparse.BooleanOptionalAction, default=True,
+                        help="エッジの2値画像を4つ目の入力チャネルに加える（--no-edges で RGB のみ）")
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_dir = args.data_dir / "SDNET2018"
@@ -156,7 +161,7 @@ def main():
                               pin_memory=True)
 
     # 3. 学習する。学習率は cosine で徐々に下げ、最後のepochのモデルを安定させる。
-    model = build_model(args.edges).to(device)
+    model = build_model(args.edges, args.arch).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -178,7 +183,8 @@ def main():
         csv.writer(handle).writerows(history)
     torch.save(model.state_dict(), args.output / "model.pt")
     (args.output / "threshold.json").write_text(
-        json.dumps({"threshold": threshold, "valid_f1": f1, "valid_ap": float(ap), "edges": args.edges}, indent=2)
+        json.dumps({"threshold": threshold, "valid_f1": f1, "valid_ap": float(ap), "edges": args.edges,
+                    "arch": args.arch}, indent=2)
     )
     with (args.output / "valid_predictions.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
